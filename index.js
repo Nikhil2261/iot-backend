@@ -218,6 +218,33 @@ app.post("/update-wifi", authMiddleware, async (req, res) => {
   }
 });
 
+
+
+//  // 🟢 My Devices (User Dashboard Fetch)
+app.get("/my-devices", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id; // authMiddleware JWT decode करके देता है
+
+    const devices = await Device.find({ customer_id: userId });
+
+    res.json({
+      ok: true,
+      devices: devices.map((d) => ({
+        device_id: d._id,
+        name: `Device ${d.pin}`,
+        pin: d.pin,
+        type: d.type,
+        status: d.status,
+        speed: d.speed,
+      })),
+    });
+  } catch (err) {
+    console.error("My Devices error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
 // 🟢 Feedback Ping (Device → Backend)
 app.post("/ping", async (req, res) => {
   try {
