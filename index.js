@@ -168,11 +168,19 @@ app.get("/device-config", async (req, res) => {
     dev.last_ping = new Date();
     await dev.save();
 
-    const configs = await Device.find({ customer_id: dev.owner });
+    // fetch config for this customer's devices
+    const configs = await Device.find({ customer_id: dev.owner }).lean();
+
+    // Normalize type ONLY for the device (so ESP always sees "switch" or "fan")
+    const devices = configs.map((d) => ({
+      ...d,
+      type: d.type === "light" ? "switch" : d.type, // device-friendly type
+    }));
+
     res.json({
       ok: true,
       wifi: { ssid: dev.wifi_ssid, password: dev.wifi_password },
-      devices: configs,
+      devices,
     });
   } catch (err) {
     console.error("Device config error:", err);
@@ -187,10 +195,14 @@ app.post("/update-status", authMiddleware, async (req, res) => {
     const device = await Device.findOne({ customer_id: req.user.id, pin });
     if (!device) return res.status(404).json({ error: "Device not found" });
 
-    if (status) device.status = status;
+    if (typeof status !== "undefined") device.status = status;
     if (typeof speed !== "undefined") device.speed = speed;
 
+    // Mark that this update came from the app/dashboard
+    device.origin = "app";
+    device.updatedAt = new Date(); // in case timestamps not enabled
     await device.save();
+
     res.json({ ok: true, status: device.status, speed: device.speed });
   } catch (err) {
     console.error("Update error:", err);
@@ -218,8 +230,6 @@ app.post("/update-wifi", authMiddleware, async (req, res) => {
   }
 });
 
-
-
 //  // 🟢 My Devices (User Dashboard Fetch)
 app.get("/my-devices", authMiddleware, async (req, res) => {
   try {
@@ -233,7 +243,7 @@ app.get("/my-devices", authMiddleware, async (req, res) => {
         device_id: d._id,
         name: `Device ${d.pin}`,
         pin: d.pin,
-        type: d.type,
+        type: d.type,   // keep original type for UI (light/fan/etc.)
         status: d.status,
         speed: d.speed,
       })),
@@ -243,7 +253,6 @@ app.get("/my-devices", authMiddleware, async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
-
 
 // 🟢 Feedback Ping (Device → Backend)
 app.post("/ping", async (req, res) => {
@@ -260,13 +269,18 @@ app.post("/ping", async (req, res) => {
 
     if (Array.isArray(states)) {
       for (const s of states) {
+        const normalizedType =
+          s.type === "light" ? "switch" : (s.type || "switch");
+
         await Device.findOneAndUpdate(
           { customer_id: dev.owner, pin: s.pin },
           {
             $set: {
-              status: s.status || "off",
-              speed: s.speed || 0,
-              type: s.type || "switch",
+              status: typeof s.status === "string" ? s.status : "off",
+              speed: typeof s.speed === "number" ? s.speed : 0,
+              type: normalizedType,
+              origin: "device",          // mark state as coming from real device/feedback
+              updatedAt: new Date(),     // make sure updatedAt reflects device change
             },
           },
           { upsert: true, new: true }
