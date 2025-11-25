@@ -30,7 +30,7 @@ mongoose
   .then(() => console.log("✅ MongoDB connected"))
   .catch((err) => console.error("❌ Mongo error:", err));
 
-// ---------------- LOGGERS ----------------
+  // ---------------- LOGGERS ----------------
 
 // 🧾 File logger setup (optional)
 const logStream = fs.createWriteStream(path.join(__dirname, "server.log"), { flags: "a" });
@@ -48,11 +48,9 @@ app.use((req, res, next) => {
 function genToken(len = 24) {
   return crypto.randomBytes(len).toString("hex");
 }
-
 function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
-
 function authMiddleware(req, res, next) {
   const header = req.headers.authorization;
   if (!header) return res.status(401).json({ error: "Missing token" });
@@ -68,8 +66,10 @@ function authMiddleware(req, res, next) {
 
 // ---------------- ROUTES ----------------
 
-// Health check
-app.get("/", (req, res) => res.send("IoT Backend with JWT ✅"));
+// health check
+app.get("/", (req, res) => res.send("IoT Backend with JWT OK"));
+
+// ---------------- SIGNUP / LOGIN ----------------
 
 // 🟢 User Signup
 app.post("/signup", async (req, res) => {
@@ -108,6 +108,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
+
 // 🟢 Request Provision Token
 app.post("/request-provision", authMiddleware, async (req, res) => {
   try {
@@ -129,6 +130,7 @@ app.post("/request-provision", authMiddleware, async (req, res) => {
     res.status(500).json({ error: "Provision request failed" });
   }
 });
+
 
 // 🟢 Device Activation
 app.post("/device-activate", async (req, res) => {
@@ -155,7 +157,7 @@ app.post("/device-activate", async (req, res) => {
   }
 });
 
-// 🟢 Device Config (device_id + token)
+// 🟢 Device Config (ESP32 pulls config)
 app.get("/device-config", async (req, res) => {
   try {
     const { device_id, token } = req.query;
@@ -168,45 +170,43 @@ app.get("/device-config", async (req, res) => {
     dev.last_ping = new Date();
     await dev.save();
 
-    // fetch config for this customer's devices
     const configs = await Device.find({ customer_id: dev.owner }).lean();
 
-    // Normalize type ONLY for the device (so ESP always sees "switch" or "fan")
+    // normalize for ESP
     const devices = configs.map((d) => ({
       ...d,
-      type: d.type === "light" ? "switch" : d.type, // device-friendly type
+      type: d.type === "light" ? "switch" : d.type,
     }));
 
-    res.json({
+    return res.json({
       ok: true,
       wifi: { ssid: dev.wifi_ssid, password: dev.wifi_password },
       devices,
     });
   } catch (err) {
     console.error("Device config error:", err);
-    res.status(500).json({ error: "Config fetch failed" });
+    return res.status(500).json({ error: "Config fetch failed" });
   }
 });
 
-// 🟢 Update Device Status (Dashboard → Device)
+// 🟢 Dashboard update status (UI → backend)
 app.post("/update-status", authMiddleware, async (req, res) => {
   try {
     const { pin, status, speed } = req.body;
-    const device = await Device.findOne({ customer_id: req.user.id, pin });
-    if (!device) return res.status(404).json({ error: "Device not found" });
+    const dev = await Device.findOne({ customer_id: req.user.id, pin });
+    if (!dev) return res.status(404).json({ error: "Device not found" });
 
-    if (typeof status !== "undefined") device.status = status;
-    if (typeof speed !== "undefined") device.speed = speed;
+    if (typeof status !== "undefined") dev.status = status;
+    if (typeof speed !== "undefined") dev.speed = speed;
 
-    // Mark that this update came from the app/dashboard
-    device.origin = "app";
-    device.updatedAt = new Date(); // in case timestamps not enabled
-    await device.save();
+    dev.origin = "app";
+    dev.updatedAt = new Date();
+    await dev.save();
 
-    res.json({ ok: true, status: device.status, speed: device.speed });
+    return res.json({ ok: true, status: dev.status, speed: dev.speed });
   } catch (err) {
     console.error("Update error:", err);
-    res.status(500).json({ error: "Update failed" });
+    return res.status(500).json({ error: "Update failed" });
   }
 });
 
@@ -229,6 +229,7 @@ app.post("/update-wifi", authMiddleware, async (req, res) => {
     res.status(500).json({ error: "Wi-Fi update failed" });
   }
 });
+
 
 //  // 🟢 My Devices (User Dashboard Fetch)
 app.get("/my-devices", authMiddleware, async (req, res) => {
@@ -254,7 +255,7 @@ app.get("/my-devices", authMiddleware, async (req, res) => {
   }
 });
 
-// 🟢 Feedback Ping (Device → Backend)
+// 🟢 Ping feedback (ESP → backend)
 app.post("/ping", async (req, res) => {
   try {
     const { device_id, token, states } = req.body;
@@ -270,31 +271,32 @@ app.post("/ping", async (req, res) => {
     if (Array.isArray(states)) {
       for (const s of states) {
         const normalizedType =
-          s.type === "light" ? "switch" : (s.type || "switch");
+          s.type === "light" ? "switch" : s.type || "switch";
 
         await Device.findOneAndUpdate(
           { customer_id: dev.owner, pin: s.pin },
           {
             $set: {
-              status: typeof s.status === "string" ? s.status : "off",
-              speed: typeof s.speed === "number" ? s.speed : 0,
+              status: s.status || "off",
+              speed: s.speed || 0,
               type: normalizedType,
-              origin: "device",          // mark state as coming from real device/feedback
-              updatedAt: new Date(),     // make sure updatedAt reflects device change
+              origin: "device",
+              updatedAt: new Date(),
             },
           },
-          { upsert: true, new: true }
+          { upsert: true }
         );
       }
     }
 
-    console.log(`📡 Ping from ${device_id} stored @ ${new Date().toISOString()}`);
-    res.json({ ok: true, msg: "Ping + feedback stored" });
+    return res.json({ ok: true, msg: "Ping stored" });
   } catch (err) {
     console.error("Ping error:", err);
-    res.status(500).json({ error: "Ping failed" });
+    return res.status(500).json({ error: "Ping failed" });
   }
 });
+
+
 
 // ---------------- OTA UPDATE ----------------
 app.use("/firmware", express.static(path.join(__dirname, "firmware")));
@@ -309,6 +311,5 @@ app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ ok: false, error: "Internal Server Error", message: err.message });
 });
-
 // ---------------- START SERVER ----------------
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
