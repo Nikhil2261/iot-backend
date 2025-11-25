@@ -158,10 +158,12 @@ app.post("/device-activate", async (req, res) => {
 });
 
 // 🟢 Device Config (ESP32 pulls config)
+// 🟢 Device Config (ESP32 pulls config — physical wins logic)
 app.get("/device-config", async (req, res) => {
   try {
     const { device_id, token } = req.query;
-    if (!device_id || !token) return res.status(400).json({ error: "Missing credentials" });
+    if (!device_id || !token) 
+      return res.status(400).json({ error: "Missing credentials" });
 
     const dev = await PhysicalDevice.findOne({ device_id });
     if (!dev || dev.device_token_hash !== hashToken(token))
@@ -172,22 +174,28 @@ app.get("/device-config", async (req, res) => {
 
     const configs = await Device.find({ customer_id: dev.owner }).lean();
 
-    // normalize for ESP
+    // return only fields needed for ESP + include origin
     const devices = configs.map((d) => ({
-      ...d,
+      pin: d.pin,
       type: d.type === "light" ? "switch" : d.type,
+      status: d.status,
+      speed: d.speed,
+      origin: d.origin || "app",   // <---- IMPORTANT
+      updatedAt: d.updatedAt       // optional debugging
     }));
 
     return res.json({
       ok: true,
       wifi: { ssid: dev.wifi_ssid, password: dev.wifi_password },
-      devices,
+      devices
     });
+
   } catch (err) {
     console.error("Device config error:", err);
     return res.status(500).json({ error: "Config fetch failed" });
   }
 });
+
 
 // 🟢 Dashboard update status (UI → backend)
 app.post("/update-status", authMiddleware, async (req, res) => {
