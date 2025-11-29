@@ -329,8 +329,63 @@ app.get("/my-devices", authMiddleware, async (req, res) => {
 //     return res.status(500).json({ error: "Ping failed" });
 //   }
 // });
+
+
+
+
 // 🟢 Ping feedback (ESP → backend)
 // 🟢 Ping feedback (ESP → backend)
+// app.post("/ping", async (req, res) => {
+//   try {
+//     const { device_id, token, states } = req.body;
+//     if (!device_id || !token) return res.status(400).json({ error: "Missing credentials" });
+
+//     const dev = await PhysicalDevice.findOne({ device_id });
+//     if (!dev || dev.device_token_hash !== hashToken(token))
+//       return res.status(401).json({ error: "Unauthorized" });
+
+//     dev.last_ping = new Date();
+//     await dev.save();
+
+//     if (Array.isArray(states)) {
+//       for (const s of states) {
+//         const db = await Device.findOne({ customer_id: dev.owner, pin: s.pin });
+
+//         // NEW PROTECTION:
+//         // if UI was last updater — don't overwrite
+//         if (db && db.origin === "app" &&
+//             (new Date() - db.updatedAt) < 5000) {
+//           console.log(`⛔ UI was recent for pin ${s.pin}, skipping ESP overwrite`);
+//           continue;
+//         }
+
+//         await Device.findOneAndUpdate(
+//           { customer_id: dev.owner, pin: s.pin },
+//           {
+//             $set: {
+//               status: s.status || "off",
+//               speed: s.speed || 0,
+//               type: s.type || "switch",
+//               origin: "device",
+//               updatedAt: new Date(),
+//             },
+//           },
+//           { upsert: true }
+//         );
+//         console.log(`⚠️ PHYSICAL updated pin ${s.pin} → ${s.status}`);
+//       }
+//     }
+
+//     return res.json({ ok: true, msg: "Ping stored" });
+//   } catch (err) {
+//     console.error("Ping error:", err);
+//     return res.status(500).json({ error: "Ping failed" });
+//   }
+// });
+
+
+
+// 🟢 Ping feedback (ESP → backend) — FINAL VERSION
 app.post("/ping", async (req, res) => {
   try {
     const { device_id, token, states } = req.body;
@@ -345,16 +400,8 @@ app.post("/ping", async (req, res) => {
 
     if (Array.isArray(states)) {
       for (const s of states) {
-        const db = await Device.findOne({ customer_id: dev.owner, pin: s.pin });
 
-        // NEW PROTECTION:
-        // if UI was last updater — don't overwrite
-        if (db && db.origin === "app" &&
-            (new Date() - db.updatedAt) < 5000) {
-          console.log(`⛔ UI was recent for pin ${s.pin}, skipping ESP overwrite`);
-          continue;
-        }
-
+        // ESP32 is always truth
         await Device.findOneAndUpdate(
           { customer_id: dev.owner, pin: s.pin },
           {
@@ -368,7 +415,7 @@ app.post("/ping", async (req, res) => {
           },
           { upsert: true }
         );
-        console.log(`⚠️ PHYSICAL updated pin ${s.pin} → ${s.status}`);
+        console.log(`✔️ DEVICE updated pin ${s.pin} → ${s.status}`);
       }
     }
 
