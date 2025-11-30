@@ -1,4 +1,3 @@
-// ---------------- ENV & MODULES ----------------
 require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
@@ -27,15 +26,21 @@ const PROV_TTL_MS = parseInt(process.env.PROV_TTL_MS || "600000", 10);
 // ---------------- DATABASE CONNECT ----------------
 mongoose
   .connect(MONGO_URI)
-  .then(() => console.log("✅ MongoDB connected"))
+  .then(async () => {
+    console.log("✅ MongoDB connected");
+    try {
+      await Device.collection.createIndex({ customer_id: 1, pin: 1 }, { unique: true });
+      console.log("✅ Device index ensured");
+    } catch (e) {
+      console.warn("⚠️ Could not create Device index:", e.message);
+    }
+  })
   .catch((err) => console.error("❌ Mongo error:", err));
 
-  // ---------------- LOGGERS ----------------
-
-// 🧾 File logger setup (optional)
+// ---------------- LOGGERS ----------------
+// File logger setup (optional)
 const logStream = fs.createWriteStream(path.join(__dirname, "server.log"), { flags: "a" });
-
-// 🧠 Request Logger (runs on every request)
+// Request Logger (runs on every request)
 app.use((req, res, next) => {
   const time = new Date().toISOString();
   const log = `[${time}] ${req.method} ${req.originalUrl} from ${req.ip}\n`;
@@ -44,7 +49,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------------- HELPER FUNCTIONS ----------------
+// ---------------- HELPERS ----------------
 function genToken(len = 24) {
   return crypto.randomBytes(len).toString("hex");
 }
@@ -65,13 +70,10 @@ function authMiddleware(req, res, next) {
 }
 
 // ---------------- ROUTES ----------------
-
-// health check
+// health
 app.get("/", (req, res) => res.send("IoT Backend with JWT OK"));
 
 // ---------------- SIGNUP / LOGIN ----------------
-
-// 🟢 User Signup
 app.post("/signup", async (req, res) => {
   try {
     const { name, email, password } = req.body;
@@ -90,7 +92,6 @@ app.post("/signup", async (req, res) => {
   }
 });
 
-// 🟢 User Login
 app.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -108,8 +109,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
-
-// 🟢 Request Provision Token
+// ---------------- PROVISION ----------------
 app.post("/request-provision", authMiddleware, async (req, res) => {
   try {
     const { device_id } = req.body;
@@ -131,8 +131,6 @@ app.post("/request-provision", authMiddleware, async (req, res) => {
   }
 });
 
-
-// 🟢 Device Activation
 app.post("/device-activate", async (req, res) => {
   try {
     const { device_id, prov_token } = req.body;
@@ -157,31 +155,28 @@ app.post("/device-activate", async (req, res) => {
   }
 });
 
-// 🟢 Device Config (ESP32 pulls config)
-// 🟢 Device Config (ESP32 pulls config — physical wins logic)
+// ---------------- DEVICE CONFIG (ESP pulls) ----------------
 app.get("/device-config", async (req, res) => {
   try {
     const { device_id, token } = req.query;
-    if (!device_id || !token) 
-      return res.status(400).json({ error: "Missing credentials" });
+    if (!device_id || !token) return res.status(400).json({ error: "Missing credentials" });
 
     const dev = await PhysicalDevice.findOne({ device_id });
-    if (!dev || dev.device_token_hash !== hashToken(token))
-      return res.status(401).json({ error: "Unauthorized" });
+    if (!dev || dev.device_token_hash !== hashToken(token)) return res.status(401).json({ error: "Unauthorized" });
 
     dev.last_ping = new Date();
     await dev.save();
 
     const configs = await Device.find({ customer_id: dev.owner }).lean();
 
-    // return only fields needed for ESP + include origin
     const devices = configs.map((d) => ({
       pin: d.pin,
       type: d.type === "light" ? "switch" : d.type,
       status: d.status,
       speed: d.speed,
-      origin: d.origin || "app",   // <---- IMPORTANT
-      updatedAt: d.updatedAt       // optional debugging
+      origin: d.origin || "app",
+      updatedAt: d.updatedAt,
+      last_changed_ms: d.last_changed_ms || 0
     }));
 
     return res.json({
@@ -189,203 +184,40 @@ app.get("/device-config", async (req, res) => {
       wifi: { ssid: dev.wifi_ssid, password: dev.wifi_password },
       devices
     });
-
   } catch (err) {
     console.error("Device config error:", err);
     return res.status(500).json({ error: "Config fetch failed" });
   }
 });
 
-
-// 🟢 Dashboard update status (UI → backend)
-// 🟢 Dashboard update status (UI → backend)
+// ---------------- DASHBOARD (UI) -> backend ----------------
 app.post("/update-status", authMiddleware, async (req, res) => {
   try {
     const { pin, status, speed } = req.body;
     const dev = await Device.findOne({ customer_id: req.user.id, pin });
     if (!dev) return res.status(404).json({ error: "Device not found" });
 
-    // UI requested change — ALWAYS WRITE origin="app"
+    const nowMs = Date.now();
+
     if (typeof status !== "undefined") dev.status = status;
     if (typeof speed !== "undefined") dev.speed = speed;
 
-    dev.origin = "app";  // UI is truth now
+    dev.origin = "app";
     dev.updatedAt = new Date();
+    dev.last_changed_ms = nowMs;
+
     await dev.save();
 
-    console.log(`✔️ UI changed pin ${pin} → ${status}`);
+    console.log(`✔️ UI changed pin ${pin} → ${dev.status} (ts=${nowMs})`);
 
-    return res.json({ ok: true, status: dev.status, speed: dev.speed });
-
+    return res.json({ ok: true, status: dev.status, speed: dev.speed, last_changed_ms: nowMs });
   } catch (err) {
     console.error("Update error:", err);
     return res.status(500).json({ error: "Update failed" });
   }
 });
 
-// app.post("/update-status", authMiddleware, async (req, res) => {
-//   try {
-//     const { pin, status, speed } = req.body;
-//     const dev = await Device.findOne({ customer_id: req.user.id, pin });
-//     if (!dev) return res.status(404).json({ error: "Device not found" });
-
-//     if (typeof status !== "undefined") dev.status = status;
-//     if (typeof speed !== "undefined") dev.speed = speed;
-
-//     dev.origin = "app";
-//     dev.updatedAt = new Date();
-//     await dev.save();
-
-//     return res.json({ ok: true, status: dev.status, speed: dev.speed });
-//   } catch (err) {
-//     console.error("Update error:", err);
-//     return res.status(500).json({ error: "Update failed" });
-//   }
-// });
-
-// 🟢 Remote Wi-Fi Update (Dashboard → Device)
-app.post("/update-wifi", authMiddleware, async (req, res) => {
-  try {
-    const { device_id, ssid, password } = req.body;
-    if (!ssid || !password) return res.status(400).json({ error: "Missing Wi-Fi details" });
-
-    const dev = await PhysicalDevice.findOne({ device_id, owner: req.user.id });
-    if (!dev) return res.status(404).json({ error: "Device not found" });
-
-    dev.wifi_ssid = ssid;
-    dev.wifi_password = password;
-    await dev.save();
-
-    res.json({ ok: true, message: "Wi-Fi credentials updated" });
-  } catch (err) {
-    console.error("Wi-Fi update error:", err);
-    res.status(500).json({ error: "Wi-Fi update failed" });
-  }
-});
-
-
-//  // 🟢 My Devices (User Dashboard Fetch)
-app.get("/my-devices", authMiddleware, async (req, res) => {
-  try {
-    const userId = req.user.id; // authMiddleware JWT decode करके देता है
-
-    const devices = await Device.find({ customer_id: userId });
-
-    res.json({
-      ok: true,
-      devices: devices.map((d) => ({
-        device_id: d._id,
-        name: `Device ${d.pin}`,
-        pin: d.pin,
-        type: d.type,   // keep original type for UI (light/fan/etc.)
-        status: d.status,
-        origin: d.origin,
-        speed: d.speed,
-      })),
-    });
-  } catch (err) {
-    console.error("My Devices error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// 🟢 Ping feedback (ESP → backend)
-// app.post("/ping", async (req, res) => {
-//   try {
-//     const { device_id, token, states } = req.body;
-//     if (!device_id || !token) return res.status(400).json({ error: "Missing credentials" });
-
-//     const dev = await PhysicalDevice.findOne({ device_id });
-//     if (!dev || dev.device_token_hash !== hashToken(token))
-//       return res.status(401).json({ error: "Unauthorized" });
-
-//     dev.last_ping = new Date();
-//     await dev.save();
-
-//     if (Array.isArray(states)) {
-//       for (const s of states) {
-//         const normalizedType =
-//           s.type === "light" ? "switch" : s.type || "switch";
-
-//         await Device.findOneAndUpdate(
-//           { customer_id: dev.owner, pin: s.pin },
-//           {
-//             $set: {
-//               status: s.status || "off",
-//               speed: s.speed || 0,
-//               type: normalizedType,
-//               origin: "device",
-//               updatedAt: new Date(),
-//             },
-//           },
-//           { upsert: true }
-//         );
-//       }
-//     }
-
-//     return res.json({ ok: true, msg: "Ping stored" });
-//   } catch (err) {
-//     console.error("Ping error:", err);
-//     return res.status(500).json({ error: "Ping failed" });
-//   }
-// });
-
-
-
-
-// 🟢 Ping feedback (ESP → backend)
-// 🟢 Ping feedback (ESP → backend)
-// app.post("/ping", async (req, res) => {
-//   try {
-//     const { device_id, token, states } = req.body;
-//     if (!device_id || !token) return res.status(400).json({ error: "Missing credentials" });
-
-//     const dev = await PhysicalDevice.findOne({ device_id });
-//     if (!dev || dev.device_token_hash !== hashToken(token))
-//       return res.status(401).json({ error: "Unauthorized" });
-
-//     dev.last_ping = new Date();
-//     await dev.save();
-
-//     if (Array.isArray(states)) {
-//       for (const s of states) {
-//         const db = await Device.findOne({ customer_id: dev.owner, pin: s.pin });
-
-//         // NEW PROTECTION:
-//         // if UI was last updater — don't overwrite
-//         if (db && db.origin === "app" &&
-//             (new Date() - db.updatedAt) < 5000) {
-//           console.log(`⛔ UI was recent for pin ${s.pin}, skipping ESP overwrite`);
-//           continue;
-//         }
-
-//         await Device.findOneAndUpdate(
-//           { customer_id: dev.owner, pin: s.pin },
-//           {
-//             $set: {
-//               status: s.status || "off",
-//               speed: s.speed || 0,
-//               type: s.type || "switch",
-//               origin: "device",
-//               updatedAt: new Date(),
-//             },
-//           },
-//           { upsert: true }
-//         );
-//         console.log(`⚠️ PHYSICAL updated pin ${s.pin} → ${s.status}`);
-//       }
-//     }
-
-//     return res.json({ ok: true, msg: "Ping stored" });
-//   } catch (err) {
-//     console.error("Ping error:", err);
-//     return res.status(500).json({ error: "Ping failed" });
-//   }
-// });
-
-
-
-// 🟢 Ping feedback (ESP → backend) — FINAL VERSION
+// ---------------- DEVICE PING (ESP -> backend) ----------------
 app.post("/ping", async (req, res) => {
   try {
     const { device_id, token, states } = req.body;
@@ -398,38 +230,53 @@ app.post("/ping", async (req, res) => {
     dev.last_ping = new Date();
     await dev.save();
 
-    if (Array.isArray(states)) {
-      for (const s of states) {
+    if (!Array.isArray(states)) return res.json({ ok: true, msg: "No states" });
 
-        // ESP32 is always truth
-        await Device.findOneAndUpdate(
-          { customer_id: dev.owner, pin: s.pin },
-          {
+    const bulkOps = [];
+    for (const s of states) {
+      const incomingTs = (typeof s.last_changed_ms === "number" && s.last_changed_ms > 0)
+        ? s.last_changed_ms
+        : Date.now();
+      const normalizedType = s.type === "light" ? "switch" : (s.type || "switch");
+
+      bulkOps.push({
+        updateOne: {
+          filter: {
+            customer_id: dev.owner,
+            pin: s.pin,
+            $or: [
+              { last_changed_ms: { $lt: incomingTs } },
+              { last_changed_ms: { $exists: false } }
+            ]
+          },
+          update: {
             $set: {
               status: s.status || "off",
               speed: s.speed || 0,
-              type: s.type || "switch",
+              type: normalizedType,
               origin: "device",
               updatedAt: new Date(),
-            },
+              last_changed_ms: incomingTs
+            }
           },
-          { upsert: true }
-        );
-        console.log(`✔️ DEVICE updated pin ${s.pin} → ${s.status}`);
-      }
+          upsert: true
+        }
+      });
     }
 
-    return res.json({ ok: true, msg: "Ping stored" });
+    if (bulkOps.length > 0) {
+      const result = await Device.bulkWrite(bulkOps, { ordered: false });
+      console.log(`✔️ DEVICE ping applied: matched=${result.matchedCount} modified=${result.modifiedCount} upserted=${result.upsertedCount}`);
+    }
+
+    return res.json({ ok: true, msg: "Ping processed" });
   } catch (err) {
     console.error("Ping error:", err);
     return res.status(500).json({ error: "Ping failed" });
   }
 });
 
-
-
-
-// ---------------- OTA UPDATE ----------------
+// ---------------- OTA AND STATIC ----------------
 app.use("/firmware", express.static(path.join(__dirname, "firmware")));
 app.get("/version.json", (req, res) => {
   res.sendFile(path.join(__dirname, "version.json"));
@@ -442,5 +289,6 @@ app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ ok: false, error: "Internal Server Error", message: err.message });
 });
+
 // ---------------- START SERVER ----------------
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
