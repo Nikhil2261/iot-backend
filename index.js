@@ -217,6 +217,34 @@ app.post("/update-status", authMiddleware, async (req, res) => {
   }
 });
 
+
+
+//  // 🟢 My Devices (User Dashboard Fetch)
+app.get("/my-devices", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id; // authMiddleware JWT decode करके देता है
+
+    const devices = await Device.find({ customer_id: userId });
+
+    res.json({
+      ok: true,
+      devices: devices.map((d) => ({
+        device_id: d._id,
+        name: `Device ${d.pin}`,
+        pin: d.pin,
+        type: d.type,   // keep original type for UI (light/fan/etc.)
+        status: d.status,
+        origin: d.origin,
+        speed: d.speed,
+      })),
+    });
+  } catch (err) {
+    console.error("My Devices error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
 // ---------------- DEVICE PING (ESP -> backend) ----------------
 app.post("/ping", async (req, res) => {
   try {
